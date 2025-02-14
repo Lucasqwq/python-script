@@ -9,6 +9,9 @@ import signal
 import sys
 sys.path.append('..')
 
+tg_bot_token = 'token_number:token_text'
+tg_chat_id = 'chat_id'
+
 log_dir = "/data/logs/vps_alb_check"
 log_file = os.path.join(log_dir, "process.log")
 
@@ -65,15 +68,16 @@ def ending_handler(signum, frame):
     """
     final_msg = "Two minuites has passed away,interrupt vps_alb_check.py ,pls check any error in log file!!"
     logger.info(final_msg)
-    bot_token = 'token_number:token_text'
-    chat_id = '-chat_id'
-    send_tg_msg(bot_token,chat_id,final_msg)
+    send_tg_msg(tg_bot_token,tg_chat_id,final_msg)
     # Perform any necessary cleanup here
     sys.exit(0)
 
 def check_alb_port(port_name, port_number, check_port):
+    """
+    Checking app-nginx alb IP is changed or not.
+    """
     for i in range(3):
-        check_command = f"ssh root@18.162.44.208 -p {port_number} 'curl -I 127.0.0.1:{check_port}'"
+        check_command = f"ssh root@18.162.44.208 -p {port_number} 'curl -s -S -I 127.0.0.1:{check_port}'"
         try:
             result = subprocess.run(
                 check_command,
@@ -87,20 +91,21 @@ def check_alb_port(port_name, port_number, check_port):
                 #print(f"{port_name} {check_port} is OK")
                 time.sleep(5) #監測間隔 *3 等於監測總時間
             else:
-                print(f"Alb port check is failed for {port_name}")
-                msg1 = nginx_reload(port_name,port_number)
-                if "failed" not in msg1:
-                    time.sleep(10)
-                    msg2 = check_port_again(port_name, port_number, check_port)
-                    msg = msg1 + msg2
-                    return msg
-                else:
-                    msg = msg1
-                    return msg
+                logger.warning(f"{port_name} returns a non-zero code:{status},msg:{result.stderr} ")
+                return f"{port_name} returns a non-zero code:{status},msg:{result.stderr} "
 
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired as e: #the alb IP has changed ,so turns into timeout situation
             logger.warning(f"{port_name} {e}")
-            return f"{port_name} {e}"
+            print(f"Alb port check is failed for {port_name}")
+            msg1 = nginx_reload(port_name,port_number)
+            if "failed" not in msg1:
+                time.sleep(10)
+                msg2 = check_port_again(port_name, port_number, check_port)
+                msg = msg1 + msg2
+                return msg
+            else:
+                msg = msg1
+                return msg
 
         except subprocess.CalledProcessError as e:
             logger.warning(f"{port_name} {e}")
@@ -112,47 +117,66 @@ def nginx_reload(port_name,port_number):
     """
     Reloading the nginx service.
     """
-    nginx_test_command = f"ssh root@18.162.44.208 -p {port_number} 'nginx -t'"
-    nginx_reload_command = f"ssh root@18.162.44.208 -p {port_number} 'nginx -s reload'"
-    result = subprocess.run(nginx_test_command, shell=True, text=True, capture_output=True)
-    status = result.returncode
-    if status == 0:
-        msg = ("nginx -t success , starting nginx_reload... ")
-        result = subprocess.run(nginx_reload_command, shell=True, text=True, capture_output=True)
+    try:
+        nginx_test_command = f"ssh root@18.162.44.208 -p {port_number} 'nginx -t'"
+        nginx_reload_command = f"ssh root@18.162.44.208 -p {port_number} 'nginx -s reload'"
+        result = subprocess.run(nginx_test_command, shell=True, text=True, capture_output=True)
         status = result.returncode
         if status == 0:
-            msg += f"{port_name} nginx reload success. "
-            return msg
-        else:
-            msg = f"{port_name} nginx reload failed,pls check!! "
-            msg += result.stderr
-            return msg
+            msg = ("nginx -t success , starting nginx_reload... ")
+            result = subprocess.run(nginx_reload_command, shell=True, text=True, capture_output=True)
+            status = result.returncode
+            if status == 0:
+                msg += f"{port_name} nginx reload success. "
+                return msg
+            else:
+                msg = f"{port_name} nginx reload failed,pls check!! "
+                msg += result.stderr
+                return msg
 
-    else:
-        msg = "nginx -t failed , pls check!! "
+        msg = f"nginx -t failed , pls check the config!!"
         msg += result.stderr
         return msg
+    
+    except subprocess.TimeoutExpired as e: #the machine can't be accessed through ssh command,contact the machine person
+        logger.warning(f"{port_name} {e} nginx -t failed and command timeout, pls check the machine and the nginx config!!")
+        print(f"{port_name} {e} nginx -t failed and command timeout, pls check the machine and the nginx config!!")
+        return f"{port_name} {e} nginx -t failed and command timeout, pls check the machine and the nginx config!!"
+        
 
 def check_port_again(port_name, port_number, check_port):
     """
     After the nginx -s reload , checking the alb connection status again.
     """
-    check_command = f"ssh root@18.162.44.208 -p {port_number} 'curl -I 127.0.0.1:{check_port}'"
+    check_command = f"ssh root@18.162.44.208 -p {port_number} 'curl -s -S -I 127.0.0.1:{check_port}'"
     for i in range(3):
-        result = subprocess.run(
-            check_command,
-            timeout=10,         #subprocess timeout setting
-            shell=True,
-            text=True,
-            capture_output=True
-            )
-        status = result.returncode
+        try:
+            result = subprocess.run(
+                check_command,
+                timeout=10,         #subprocess timeout setting
+                shell=True,
+                text=True,
+                capture_output=True
+                )
+            status = result.returncode
 
-        if status == 0:
-            #print(f"{port_name} {check_port} is OK")
-            time.sleep(5) #監測間隔 *3 等於監測總時間
-        else:
-            return f"{port_name} {check_port} double check is failed ,pls check!!"
+            if status == 0:
+                #print(f"{port_name} {check_port} is OK")
+                time.sleep(5) #監測間隔 *3 等於監測總時間
+            else:
+                logger.warning(f"{port_name} returns a non-zero code:{status},msg:{result.stderr} ")
+                return f"{port_name} returns a non-zero code:{status},msg:{result.stderr} "
+      
+        except subprocess.TimeoutExpired as e: #the alb IP has changed ,so turns into timeout situation
+            logger.warning(f"{port_name} {e}")
+            print(f"{port_name} is still timeout failed in double check , pls check!! ")
+            return f"{port_name} is still timeout failed in double check , pls check!! "
+
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"{port_name} {e}")
+            print(f"{port_name} double check is failed in process error ,pls check!!")
+            return f"{port_name} double check is failed in process error ,pls check!!"
+        
 
     return f"{port_name} {check_port} double check is OK."
 
@@ -160,8 +184,8 @@ def check_port_again(port_name, port_number, check_port):
 
 def check_alb_connection():
     """
-    Determing each connection port for machines and checking alb connection status.
-    If check is failed,the process will auto reload the nginx service to get the newest IP.
+    Main process for checking app-nginx alb connection status, and determing each connection port for machines.
+    If check is failed,the process will auto reload the nginx service to reflush nginx to get the newest IP.
     """
     ports = {
         #"vps5sz": 32233, #測試用
@@ -232,9 +256,7 @@ def main():
         logger.info("All machine's alb_upstream_ports are OK")
     else:
         logger.info(final_msg)
-        bot_token = 'token_number:token_text'
-        chat_id = '-chat_id'
-        send_tg_msg(bot_token,chat_id,final_msg)
+        send_tg_msg(tg_bot_token,tg_chat_id,final_msg)
 
 if __name__ == '__main__':
     signal.signal(signal.SIGALRM, ending_handler)
